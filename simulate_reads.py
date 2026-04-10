@@ -24,6 +24,15 @@ import random
 import sys
 
 # ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+# R2 (reverse read) contains the UMI and common adapter; it is sequenced from
+# the relatively clean adapter end of the molecule and therefore tends to have
+# fewer errors than R1 (which spans the STR repeat region).  The R2 error rate
+# is set to this fraction of the R1 rate by default.
+R2_ERROR_RATE_FACTOR = 0.3
+# ---------------------------------------------------------------------------
 # Known forensic STR repeat units (forward strand, canonical direction)
 # ---------------------------------------------------------------------------
 REPEAT_UNITS = {
@@ -349,7 +358,10 @@ def main():
     )
     parser.add_argument(
         "--r2-error-rate", type=float, default=None,
-        help="Per-base sequencing error rate for R2 (default: 30%% of --error-rate).",
+        help=(
+            f"Per-base sequencing error rate for R2 "
+            f"(default: {int(R2_ERROR_RATE_FACTOR*100)}%% of --error-rate)."
+        ),
     )
     parser.add_argument(
         "--read-len", type=int, default=150,
@@ -367,7 +379,7 @@ def main():
 
     r2_error_rate = args.r2_error_rate
     if r2_error_rate is None:
-        r2_error_rate = args.error_rate * 0.3
+        r2_error_rate = args.error_rate * R2_ERROR_RATE_FACTOR
 
     os.makedirs(args.out_dir, exist_ok=True)
 

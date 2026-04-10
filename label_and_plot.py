@@ -65,16 +65,28 @@ def label_file(in_path, sample_name, truth, out_path):
     """
     Read a TSV file, add Sample + Correct columns, write labelled output.
     Returns list of row dicts (with Sample and Correct added).
-
-    UMIHaploCollect.py emits two debug print-dict lines before the TSV header;
-    those non-TSV lines are silently skipped here.
     """
     import io
     rows = []
     with open(in_path, newline="") as fh:
-        # Skip lines that look like Python dict-prints (start with '{')
-        raw_lines = [ln for ln in fh if not ln.lstrip().startswith("{")]
-    reader = csv.DictReader(io.StringIO("".join(raw_lines)), delimiter="\t")
+        # Robustly locate the TSV header: find the first line that contains a
+        # tab-separated field list starting with a known column name.  This
+        # tolerates any non-TSV lines (e.g., debug prints) that may precede the
+        # real header.
+        raw_lines = fh.readlines()
+
+    header_idx = None
+    for i, line in enumerate(raw_lines):
+        fields = line.rstrip("\n").split("\t")
+        if len(fields) > 1 and fields[0].strip() in ("Locus", "Sample"):
+            header_idx = i
+            break
+    if header_idx is None:
+        return rows
+
+    reader = csv.DictReader(
+        io.StringIO("".join(raw_lines[header_idx:])), delimiter="\t"
+    )
     if not reader.fieldnames:
         return rows
     for row in reader:

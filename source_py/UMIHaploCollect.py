@@ -70,8 +70,8 @@ for line in sys.stdin:
     locTotUmi[curPrim] += 1
     locTotRead[curPrim] += int(lineS[aredcInd])
 
-print(locTotUmi)
-print(locTotRead)
+print(locTotUmi, file=sys.stderr)
+print(locTotRead, file=sys.stderr)
 
 # output families
 toPrin = []
@@ -92,7 +92,7 @@ locInd = colMap["Locus"]
 perInd = colMap["Period"]
 lenInd = colMap["Primary_Length"]
 phrAggInd = colMap["Phred_Aggregate"]
-pcorInd = phrAggInd  # pCorrect column was merged into Phred_Aggregate
+pcorInd = phrAggInd  # pCorrect was removed from famsum output; Phred_Aggregate is the substitute (same data, log10 scale)
 propInd = colMap["Primary_Proportion"]
 maxminUInd = colMap["Phred_MaxMin_UMI"]
 phrAggBestInd = colMap["Phred_Aggregate_Best_Primary"]
