@@ -92,7 +92,7 @@ locInd = colMap["Locus"]
 perInd = colMap["Period"]
 lenInd = colMap["Primary_Length"]
 phrAggInd = colMap["Phred_Aggregate"]
-pcorInd = colMap["pCorrect"]
+pcorInd = phrAggInd  # pCorrect column was merged into Phred_Aggregate
 propInd = colMap["Primary_Proportion"]
 maxminUInd = colMap["Phred_MaxMin_UMI"]
 phrAggBestInd = colMap["Phred_Aggregate_Best_Primary"]
@@ -118,7 +118,7 @@ for curKey in allHaplos:
         numRead += alleT[0]
         totRead += int(lineS[aredcInd])
         phredAggWrong += log10ProbComp(float(lineS[phrAggInd]))
-        pnotCor += log10ProbComp(safeLog10(float(lineS[pcorInd])))
+        pnotCor += log10ProbComp(float(lineS[pcorInd]))
         if len(famDat) == 20:
             continue
         famDat.append(lineS[redcInd])
