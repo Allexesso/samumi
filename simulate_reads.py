@@ -342,6 +342,11 @@ def simulate_sample(
     """
     Generate all FASTQ reads for one simulated single-source individual.
 
+    read_offset: starting read index for unique read naming.  Useful when
+    calling this function multiple times and writing to the same FASTQ file
+    (e.g. contributor 1 then contributor 2 in a mixture), so that read names
+    do not collide.
+
     Returns a list of ground-truth dicts:
       {sample, locus, primer, allele1_seq, allele2_seq, allele1_len, allele2_len}
     """
@@ -644,9 +649,6 @@ def main():
     if args.mix_pairs:
         print()
         for p in range(1, args.mix_pairs + 1):
-            ind_a = 2 * p - 1   # individual indices within the already-generated set
-            ind_b = 2 * p
-
             for ratio_label, fam_c1, fam_c2 in (
                 ("1to1",
                  max(1, args.families // 2),

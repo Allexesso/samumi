@@ -96,7 +96,7 @@ shopt -s nullglob
 # Process all FASTQ pairs: single-source (sample_*) and mixture (mix_*).
 R1_FILES=("${DATA_DIR}"/*_R1.fq)
 if [[ ${#R1_FILES[@]} -eq 0 ]]; then
-    echo "ERROR: No sample_*_R1.fq files found in ${DATA_DIR}" >&2
+    echo "ERROR: No *_R1.fq files found in ${DATA_DIR}" >&2
     exit 1
 fi
 
