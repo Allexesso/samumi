@@ -8,13 +8,24 @@ Read structure (paired-end):
                  [RC(primer)][RC(repeat_seq)][RC(anchor)][padding]  (isRC = 1)
   R2 (reverse):  [UMI (umi_len bp)][common_seq][random padding]
 
+This matches the experimental design described in the paper:
+  - 2×301 cycle paired-end sequencing (default --read-len 301)
+  - 64 single-source individuals (default --samples 64)
+  - 15 pairs of mixed-DNA samples at 1:1 and 1:9 contributor ratios
+    (enabled via --mix-pairs, default 15)
+
 Usage:
   python simulate_reads.py [options]
 
 Outputs (all in --out-dir):
-  sample_NNN_R1.fq   – forward reads for each simulated individual
-  sample_NNN_R2.fq   – reverse reads for each simulated individual
-  truth.tsv          – ground truth allele assignments per sample × locus
+  sample_NNN_R1.fq            – forward reads for each simulated individual
+  sample_NNN_R2.fq            – reverse reads for each simulated individual
+  mix_NNN_1to1_R1.fq          – 1:1 mixture reads for pair NNN
+  mix_NNN_1to1_R2.fq
+  mix_NNN_1to9_R1.fq          – 1:9 mixture reads for pair NNN
+  mix_NNN_1to9_R2.fq
+  truth.tsv                   – ground truth allele assignments per sample × locus
+                                (includes allele3/allele4 columns for mixture samples)
 """
 
 import argparse
@@ -229,6 +240,89 @@ def _random_umi(length, rng):
 # ---------------------------------------------------------------------------
 # Per-sample simulation
 # ---------------------------------------------------------------------------
+
+def _emit_allele_reads(
+    sample_name, locus, primer, anchor, is_rc,
+    allele_n, allele_seq, repeat_unit,
+    n_families, reads_per_family,
+    r1_error_rate, r2_error_rate, stutter_rate,
+    umi_len, common_seq, read_len, rng,
+    r1_fh, r2_fh, read_idx,
+):
+    """
+    Emit FASTQ reads for one diploid allele copy into open file handles.
+
+    For each UMI family a fraction *stutter_rate* of reads are replaced with
+    PCR-slippage stutter molecules: n-1 repeats (backward stutter, the dominant
+    artefact in STR sequencing) at probability *stutter_rate*, and n+1 repeats
+    (forward stutter) at probability *stutter_rate* * STUTTER_PLUS_FACTOR.
+    Stutter reads share the same UMI as their parent family and therefore
+    appear as minority alleles within that family – exactly the signal that the
+    SamUMI random-forest models are trained to recognise and correct.
+
+    Returns the updated read_idx (so the caller can chain calls without
+    colliding read names, e.g. when writing two contributors to the same file).
+    """
+    stutter_plus_rate = stutter_rate * STUTTER_PLUS_FACTOR
+    stutter_minus_seq = repeat_unit * (allele_n - 1) if allele_n > 1 else None
+    stutter_plus_seq  = repeat_unit * (allele_n + 1)
+
+    for _ in range(n_families):
+        umi = _random_umi(umi_len, rng)
+
+        for _ in range(reads_per_family):
+            read_name = f"{sample_name}.{locus}.{read_idx}"
+            read_idx += 1
+
+            # ── Choose allele sequence for this read ──────────────────────
+            # With probability stutter_rate the read comes from an n-1
+            # PCR-slippage molecule (backward stutter); with probability
+            # stutter_plus_rate from an n+1 molecule (forward stutter);
+            # otherwise the true allele.
+            roll = rng.random()
+            if stutter_minus_seq is not None and roll < stutter_rate:
+                read_allele_seq = stutter_minus_seq
+            elif roll < stutter_rate + stutter_plus_rate:
+                read_allele_seq = stutter_plus_seq
+            else:
+                read_allele_seq = allele_seq
+
+            # ── Build R1 core ─────────────────────────────────────────────
+            if is_rc:
+                # On the reverse strand the read spans:
+                # RC(primer) + RC(allele) + RC(anchor)
+                core_r1 = (
+                    reverse_complement(primer)
+                    + reverse_complement(read_allele_seq)
+                    + reverse_complement(anchor)
+                )
+            else:
+                core_r1 = primer + read_allele_seq + anchor
+
+            pad_r1 = max(0, read_len - len(core_r1))
+            raw_r1 = (
+                core_r1
+                + "".join(rng.choice("ACGT") for _ in range(pad_r1))
+            )[:read_len]
+            r1_seq, r1_qual = _simulate_read(raw_r1, r1_error_rate, rng)
+
+            # ── Build R2 core ─────────────────────────────────────────────
+            # UMI sits immediately before the common sequence on R2.
+            core_r2 = umi + common_seq
+            pad_r2 = max(0, read_len - len(core_r2))
+            raw_r2 = (
+                core_r2
+                + "".join(rng.choice("ACGT") for _ in range(pad_r2))
+            )[:read_len]
+            r2_seq, r2_qual = _simulate_read(raw_r2, r2_error_rate, rng)
+
+            # Write FASTQ entries
+            r1_fh.write(f"@{read_name}/1\n{r1_seq}\n+\n{r1_qual}\n")
+            r2_fh.write(f"@{read_name}/2\n{r2_seq}\n+\n{r2_qual}\n")
+
+    return read_idx
+
+
 def simulate_sample(
     sample_name,
     loci,
@@ -243,24 +337,16 @@ def simulate_sample(
     rng,
     r1_fh,
     r2_fh,
+    read_offset=0,
 ):
     """
-    Generate all FASTQ reads for one simulated individual.
-
-    For each UMI family a fraction *stutter_rate* of reads are replaced with
-    PCR-slippage stutter molecules: n-1 repeats (backward stutter, the dominant
-    artefact in STR sequencing) at probability *stutter_rate*, and n+1 repeats
-    (forward stutter) at probability *stutter_rate* * STUTTER_PLUS_FACTOR.
-    Stutter reads share the same UMI as their parent family and therefore
-    appear as minority alleles within that family – exactly the signal that the
-    SamUMI random-forest models are trained to recognise and correct.
+    Generate all FASTQ reads for one simulated single-source individual.
 
     Returns a list of ground-truth dicts:
       {sample, locus, primer, allele1_seq, allele2_seq, allele1_len, allele2_len}
     """
     truth_records = []
-    read_idx = 0
-    stutter_plus_rate = stutter_rate * STUTTER_PLUS_FACTOR
+    read_idx = read_offset
 
     for loc in loci:
         locus     = loc["locus"]
@@ -295,64 +381,111 @@ def simulate_sample(
             (allele1_n, allele1_seq),
             (allele2_n, allele2_seq),
         ):
-            # Precompute stutter allele sequences for this copy.
-            # n-1 stutter: one repeat unit shorter (impossible when n=1).
-            # n+1 stutter: one repeat unit longer.
-            stutter_minus_seq = repeat_unit * (allele_n - 1) if allele_n > 1 else None
-            stutter_plus_seq  = repeat_unit * (allele_n + 1)
+            read_idx = _emit_allele_reads(
+                sample_name, locus, primer, anchor, is_rc,
+                allele_n, allele_seq, repeat_unit,
+                families_per_allele, reads_per_family,
+                r1_error_rate, r2_error_rate, stutter_rate,
+                umi_len, common_seq, read_len, rng,
+                r1_fh, r2_fh, read_idx,
+            )
 
-            for _ in range(families_per_allele):
-                umi = _random_umi(umi_len, rng)
+    return truth_records
 
-                for _ in range(reads_per_family):
-                    read_name = f"{sample_name}.{locus}.{read_idx}"
-                    read_idx += 1
 
-                    # ── Choose allele sequence for this read ──────────────
-                    # With probability stutter_rate the read comes from an
-                    # n-1 PCR-slippage molecule (backward stutter); with
-                    # probability stutter_plus_rate from an n+1 molecule
-                    # (forward stutter); otherwise the true allele.
-                    roll = rng.random()
-                    if stutter_minus_seq is not None and roll < stutter_rate:
-                        read_allele_seq = stutter_minus_seq
-                    elif roll < stutter_rate + stutter_plus_rate:
-                        read_allele_seq = stutter_plus_seq
-                    else:
-                        read_allele_seq = allele_seq
+def simulate_mixture_sample(
+    sample_name,
+    loci,
+    common_seq,
+    umi_len,
+    read_len,
+    families_c1,
+    families_c2,
+    reads_per_family,
+    r1_error_rate,
+    r2_error_rate,
+    stutter_rate,
+    rng,
+    r1_fh,
+    r2_fh,
+):
+    """
+    Generate mixed FASTQ reads from two contributors into the same output files.
 
-                    # ── Build R1 core ─────────────────────────────────────
-                    if is_rc:
-                        # On the reverse strand the read spans:
-                        # RC(primer) + RC(allele) + RC(anchor)
-                        core_r1 = (
-                            reverse_complement(primer)
-                            + reverse_complement(read_allele_seq)
-                            + reverse_complement(anchor)
-                        )
-                    else:
-                        core_r1 = primer + read_allele_seq + anchor
+    The two contributors' reads are interleaved in the output files in proportion
+    to their family counts (families_c1 : families_c2), mimicking the physical
+    mixing of DNA at a given ratio before library preparation.
 
-                    pad_r1 = max(0, read_len - len(core_r1))
-                    raw_r1 = (
-                        core_r1
-                        + "".join(rng.choice("ACGT") for _ in range(pad_r1))
-                    )[:read_len]
-                    r1_seq, r1_qual = _simulate_read(raw_r1, r1_error_rate, rng)
+    Returns a list of ground-truth dicts with alleles from *both* contributors:
+      {sample, locus, primer,
+       allele1_seq, allele2_seq, allele1_len, allele2_len,   ← contributor 1
+       allele3_seq, allele4_seq, allele3_len, allele4_len}   ← contributor 2
+    """
+    truth_records = []
+    read_idx = 0
 
-                    # ── Build R2 core ─────────────────────────────────────
-                    # UMI sits immediately before the common sequence
-                    core_r2 = umi + common_seq
-                    pad_r2 = max(0, read_len - len(core_r2))
-                    raw_r2 = (
-                        core_r2
-                        + "".join(rng.choice("ACGT") for _ in range(pad_r2))
-                    )[:read_len]
-                    r2_seq, r2_qual = _simulate_read(raw_r2, r2_error_rate, rng)
+    for loc in loci:
+        locus     = loc["locus"]
+        primer    = loc["primer"]
+        anchor    = loc["anchor"]
+        is_rc     = loc["is_rc"]
+        period    = loc["period"]
 
-                    # Write FASTQ entries
-                    r1_fh.write(f"@{read_name}/1\n{r1_seq}\n+\n{r1_qual}\n")
-                    r2_fh.write(f"@{read_name}/2\n{r2_seq}\n+\n{r2_qual}\n")
+        repeat_unit = _repeat_unit_for(locus, period)
+        lo, hi      = _allele_range_for(locus, period, read_len, primer, anchor)
+
+        # Assign diploid alleles for each contributor independently
+        c1_a1_n = rng.randint(lo, hi)
+        c1_a2_n = rng.randint(lo, hi)
+        c2_a1_n = rng.randint(lo, hi)
+        c2_a2_n = rng.randint(lo, hi)
+
+        c1_a1_seq = repeat_unit * c1_a1_n
+        c1_a2_seq = repeat_unit * c1_a2_n
+        c2_a1_seq = repeat_unit * c2_a1_n
+        c2_a2_seq = repeat_unit * c2_a2_n
+
+        truth_records.append({
+            "sample":      sample_name,
+            "locus":       locus,
+            "primer":      primer,
+            "allele1_seq": c1_a1_seq,
+            "allele2_seq": c1_a2_seq,
+            "allele1_len": len(c1_a1_seq),
+            "allele2_len": len(c1_a2_seq),
+            "allele3_seq": c2_a1_seq,
+            "allele4_seq": c2_a2_seq,
+            "allele3_len": len(c2_a1_seq),
+            "allele4_len": len(c2_a2_seq),
+        })
+
+        # Emit contributor 1 reads (proportional to families_c1)
+        for allele_n, allele_seq in (
+            (c1_a1_n, c1_a1_seq),
+            (c1_a2_n, c1_a2_seq),
+        ):
+            read_idx = _emit_allele_reads(
+                sample_name, locus, primer, anchor, is_rc,
+                allele_n, allele_seq, repeat_unit,
+                families_c1, reads_per_family,
+                r1_error_rate, r2_error_rate, stutter_rate,
+                umi_len, common_seq, read_len, rng,
+                r1_fh, r2_fh, read_idx,
+            )
+
+        # Emit contributor 2 reads (proportional to families_c2)
+        for allele_n, allele_seq in (
+            (c2_a1_n, c2_a1_seq),
+            (c2_a2_n, c2_a2_seq),
+        ):
+            read_idx = _emit_allele_reads(
+                sample_name, locus, primer, anchor, is_rc,
+                allele_n, allele_seq, repeat_unit,
+                families_c2, reads_per_family,
+                r1_error_rate, r2_error_rate, stutter_rate,
+                umi_len, common_seq, read_len, rng,
+                r1_fh, r2_fh, read_idx,
+            )
 
     return truth_records
 
@@ -380,8 +513,18 @@ def main():
         help="UMI length in bases.",
     )
     parser.add_argument(
-        "--samples", type=int, default=20,
-        help="Number of simulated individuals.",
+        "--samples", type=int, default=64,
+        help="Number of simulated single-source individuals (paper: 64).",
+    )
+    parser.add_argument(
+        "--mix-pairs", type=int, default=15,
+        help=(
+            "Number of mixture pairs to simulate.  Each pair produces one 1:1 "
+            "and one 1:9 mixture FASTQ.  Set to 0 to disable mixture simulation. "
+            "Pairs are drawn from the single-source individuals in order "
+            "(pair 1 = individuals 1+2, pair 2 = 3+4, …); requires "
+            "--samples >= 2 * --mix-pairs.  Paper: 15 pairs."
+        ),
     )
     parser.add_argument(
         "--families", type=int, default=10,
@@ -412,8 +555,8 @@ def main():
         ),
     )
     parser.add_argument(
-        "--read-len", type=int, default=150,
-        help="Read length in bases.",
+        "--read-len", type=int, default=301,
+        help="Read length in bases (paper: 2×301 cycle sequencing).",
     )
     parser.add_argument(
         "--seed", type=int, default=42,
@@ -429,6 +572,15 @@ def main():
     if r2_error_rate is None:
         r2_error_rate = args.error_rate * R2_ERROR_RATE_FACTOR
 
+    if args.mix_pairs > 0 and args.samples < 2 * args.mix_pairs:
+        print(
+            f"ERROR: --mix-pairs {args.mix_pairs} requires at least "
+            f"{2 * args.mix_pairs} single-source individuals (--samples), "
+            f"but only {args.samples} requested.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     os.makedirs(args.out_dir, exist_ok=True)
 
     rng = random.Random(args.seed)
@@ -441,15 +593,20 @@ def main():
     print(f"Loaded {len(loci)} loci from {args.primer}")
     print(f"Simulating {args.samples} individual(s): "
           f"{args.families} families × {args.reads} reads per allele per locus")
+    if args.mix_pairs:
+        print(f"Simulating {args.mix_pairs} mixture pair(s): "
+              f"1:1 and 1:9 ratios → {2 * args.mix_pairs} mixture sample(s)")
     print(f"  R1 error rate    : {args.error_rate}")
     print(f"  R2 error rate    : {r2_error_rate:.4f}")
     print(f"  Stutter rate     : {args.stutter_rate} (n-1) / "
           f"{args.stutter_rate * STUTTER_PLUS_FACTOR:.4f} (n+1)")
+    print(f"  Read length      : {args.read_len} bp")
     print()
 
     truth_path = os.path.join(args.out_dir, "truth.tsv")
     all_truth = []
 
+    # ── Single-source individuals ─────────────────────────────────────────────
     for s in range(1, args.samples + 1):
         sample_name = f"sample_{s:03d}"
         r1_path = os.path.join(args.out_dir, f"{sample_name}_R1.fq")
@@ -476,19 +633,85 @@ def main():
         n_reads = len(loci) * 2 * args.families * args.reads
         print(f"{n_reads:,} reads")
 
-    # Write ground truth
+    # ── Mixture samples ───────────────────────────────────────────────────────
+    # Mirrors the paper: 15 pairs × (1:1 + 1:9) = 30 mixture FASTQs.
+    # families_per_allele is split between the two contributors according to
+    # the mix ratio so that the total sequencing depth remains constant:
+    #   1:1  → each contributor gets families // 2 families
+    #   1:9  → contributor 1 gets families // 10,
+    #           contributor 2 gets families - families // 10
+    # (minimum 1 family per contributor to avoid empty files)
+    if args.mix_pairs:
+        print()
+        for p in range(1, args.mix_pairs + 1):
+            ind_a = 2 * p - 1   # individual indices within the already-generated set
+            ind_b = 2 * p
+
+            for ratio_label, fam_c1, fam_c2 in (
+                ("1to1",
+                 max(1, args.families // 2),
+                 max(1, args.families - args.families // 2)),
+                ("1to9",
+                 max(1, args.families // 10),
+                 max(1, args.families - args.families // 10)),
+            ):
+                mix_name = f"mix_{p:03d}_{ratio_label}"
+                r1_path = os.path.join(args.out_dir, f"{mix_name}_R1.fq")
+                r2_path = os.path.join(args.out_dir, f"{mix_name}_R2.fq")
+
+                print(
+                    f"  {mix_name}  "
+                    f"(pair {ind_a}/{ind_b}, C1={fam_c1} fam, C2={fam_c2} fam) …",
+                    end=" ", flush=True,
+                )
+                with open(r1_path, "w") as r1_fh, open(r2_path, "w") as r2_fh:
+                    truth = simulate_mixture_sample(
+                        sample_name=mix_name,
+                        loci=loci,
+                        common_seq=args.common,
+                        umi_len=args.umi_len,
+                        read_len=args.read_len,
+                        families_c1=fam_c1,
+                        families_c2=fam_c2,
+                        reads_per_family=args.reads,
+                        r1_error_rate=args.error_rate,
+                        r2_error_rate=r2_error_rate,
+                        stutter_rate=args.stutter_rate,
+                        rng=rng,
+                        r1_fh=r1_fh,
+                        r2_fh=r2_fh,
+                    )
+                all_truth.extend(truth)
+                n_reads = len(loci) * (fam_c1 + fam_c2) * 2 * args.reads
+                print(f"{n_reads:,} reads")
+
+    # ── Write ground truth ────────────────────────────────────────────────────
+    # Single-source rows contain allele1/allele2 only.
+    # Mixture rows additionally contain allele3/allele4 (contributor 2).
+    single_source_fields = [
+        "sample", "locus", "primer",
+        "allele1_seq", "allele2_seq",
+        "allele1_len", "allele2_len",
+    ]
+    mixture_fields = [
+        "allele3_seq", "allele4_seq",
+        "allele3_len", "allele4_len",
+    ]
+    all_fields = single_source_fields + mixture_fields
+
     with open(truth_path, "w", newline="") as fh:
         writer = csv.DictWriter(
             fh,
-            fieldnames=[
-                "sample", "locus", "primer",
-                "allele1_seq", "allele2_seq",
-                "allele1_len", "allele2_len",
-            ],
+            fieldnames=all_fields,
             delimiter="\t",
+            extrasaction="ignore",
         )
         writer.writeheader()
-        writer.writerows(all_truth)
+        for rec in all_truth:
+            # Fill missing mixture columns with empty strings for single-source rows
+            for col in mixture_fields:
+                rec.setdefault(col, "")
+            writer.writerow(rec)
 
     print()
     print(f"Simulation complete.")

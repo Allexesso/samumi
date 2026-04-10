@@ -32,29 +32,52 @@ def load_truth(truth_path):
     """
     Load truth.tsv produced by simulate_reads.py.
 
-    Returns a dict:  (sample, locus) -> {allele1_len, allele2_len, allele1_seq, allele2_seq}
+    Returns a dict:  (sample, locus) -> truth_entry
+
+    For single-source samples the entry contains:
+      {allele1_len, allele2_len, allele1_seq, allele2_seq}
+
+    For mixture samples (two contributors) the entry additionally contains:
+      {allele3_len, allele4_len, allele3_seq, allele4_seq}
     """
     truth = {}
     with open(truth_path) as fh:
         reader = csv.DictReader(fh, delimiter="\t")
         for row in reader:
             key = (row["sample"], row["locus"])
-            truth[key] = {
+            entry = {
                 "allele1_seq": row["allele1_seq"],
                 "allele2_seq": row["allele2_seq"],
                 "allele1_len": int(row["allele1_len"]),
                 "allele2_len": int(row["allele2_len"]),
             }
+            # Mixture samples have alleles from a second contributor.
+            if row.get("allele3_seq"):
+                entry["allele3_seq"] = row["allele3_seq"]
+                entry["allele4_seq"] = row["allele4_seq"]
+                entry["allele3_len"] = int(row["allele3_len"])
+                entry["allele4_len"] = int(row["allele4_len"])
+            truth[key] = entry
     return truth
 
 
 def _correct_flag(called_len, truth_entry):
-    """Return 1 if called_len matches either true allele length, else 0."""
+    """Return 1 if called_len matches any true allele length, else 0.
+
+    For single-source samples the true allele lengths are allele1_len and
+    allele2_len.  For mixture samples (two contributors) allele3_len and
+    allele4_len are also checked so that alleles from the minor contributor
+    are correctly classified as True positives.
+    """
     try:
         n = int(called_len)
     except (TypeError, ValueError):
         return 0
-    return 1 if n in (truth_entry["allele1_len"], truth_entry["allele2_len"]) else 0
+    true_lengths = {truth_entry["allele1_len"], truth_entry["allele2_len"]}
+    if "allele3_len" in truth_entry:
+        true_lengths.add(truth_entry["allele3_len"])
+        true_lengths.add(truth_entry["allele4_len"])
+    return 1 if n in true_lengths else 0
 
 
 # ---------------------------------------------------------------------------
