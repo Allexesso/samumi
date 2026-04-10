@@ -36,19 +36,21 @@ DO_SIMULATE=1
 SAMPLES=20
 FAMILIES=10
 READS=8
+STUTTER_RATE=0.10
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-simulate)  DO_SIMULATE=0 ;;
-        --samples)      SAMPLES="$2";  shift ;;
-        --families)     FAMILIES="$2"; shift ;;
-        --reads)        READS="$2";    shift ;;
-        --data-dir)     DATA_DIR="$2"; shift ;;
-        --common)       COMMON_SEQ="$2"; shift ;;
-        --umi-len)      UMI_LEN="$2";  shift ;;
-        --run-type)     RUN_TYPE="$2"; shift ;;
-        --ham)          HAM="$2";      shift ;;
+        --samples)      SAMPLES="$2";       shift ;;
+        --families)     FAMILIES="$2";      shift ;;
+        --reads)        READS="$2";         shift ;;
+        --stutter-rate) STUTTER_RATE="$2";  shift ;;
+        --data-dir)     DATA_DIR="$2";      shift ;;
+        --common)       COMMON_SEQ="$2";    shift ;;
+        --umi-len)      UMI_LEN="$2";       shift ;;
+        --run-type)     RUN_TYPE="$2";      shift ;;
+        --ham)          HAM="$2";           shift ;;
         *)  echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
     shift
@@ -68,13 +70,14 @@ fi
 if [[ "${DO_SIMULATE}" -eq 1 ]]; then
     echo "=== Simulating reads ==="
     python3 "${SCRIPT_DIR}/simulate_reads.py" \
-        --primer   "${PRIMER}" \
-        --common   "${COMMON_SEQ}" \
-        --umi-len  "${UMI_LEN}" \
-        --samples  "${SAMPLES}" \
-        --families "${FAMILIES}" \
-        --reads    "${READS}" \
-        --out-dir  "${DATA_DIR}"
+        --primer        "${PRIMER}" \
+        --common        "${COMMON_SEQ}" \
+        --umi-len       "${UMI_LEN}" \
+        --samples       "${SAMPLES}" \
+        --families      "${FAMILIES}" \
+        --reads         "${READS}" \
+        --stutter-rate  "${STUTTER_RATE}" \
+        --out-dir       "${DATA_DIR}"
     echo
 fi
 

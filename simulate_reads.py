@@ -32,6 +32,13 @@ import sys
 # fewer errors than R1 (which spans the STR repeat region).  The R2 error rate
 # is set to this fraction of the R1 rate by default.
 R2_ERROR_RATE_FACTOR = 0.3
+
+# Within a UMI family, some reads originate from PCR-slippage stutter molecules
+# that are one repeat unit shorter (n-1) than the true allele.  Forward stutter
+# (n+1) occurs at roughly this fraction of the backward (n-1) stutter rate.
+# These constants mirror values typical for forensic 4-bp STR loci.
+STUTTER_DEFAULT_RATE = 0.10   # fraction of reads per family that are n-1 stutter
+STUTTER_PLUS_FACTOR  = 0.30   # n+1 stutter rate = stutter_rate * this factor
 # ---------------------------------------------------------------------------
 # Known forensic STR repeat units (forward strand, canonical direction)
 # ---------------------------------------------------------------------------
@@ -232,6 +239,7 @@ def simulate_sample(
     reads_per_family,
     r1_error_rate,
     r2_error_rate,
+    stutter_rate,
     rng,
     r1_fh,
     r2_fh,
@@ -239,11 +247,20 @@ def simulate_sample(
     """
     Generate all FASTQ reads for one simulated individual.
 
+    For each UMI family a fraction *stutter_rate* of reads are replaced with
+    PCR-slippage stutter molecules: n-1 repeats (backward stutter, the dominant
+    artefact in STR sequencing) at probability *stutter_rate*, and n+1 repeats
+    (forward stutter) at probability *stutter_rate* * STUTTER_PLUS_FACTOR.
+    Stutter reads share the same UMI as their parent family and therefore
+    appear as minority alleles within that family – exactly the signal that the
+    SamUMI random-forest models are trained to recognise and correct.
+
     Returns a list of ground-truth dicts:
       {sample, locus, primer, allele1_seq, allele2_seq, allele1_len, allele2_len}
     """
     truth_records = []
     read_idx = 0
+    stutter_plus_rate = stutter_rate * STUTTER_PLUS_FACTOR
 
     for loc in loci:
         locus     = loc["locus"]
@@ -274,7 +291,16 @@ def simulate_sample(
         })
 
         # Generate reads for each allele copy (diploid = 2 copies)
-        for allele_seq in (allele1_seq, allele2_seq):
+        for allele_n, allele_seq in (
+            (allele1_n, allele1_seq),
+            (allele2_n, allele2_seq),
+        ):
+            # Precompute stutter allele sequences for this copy.
+            # n-1 stutter: one repeat unit shorter (impossible when n=1).
+            # n+1 stutter: one repeat unit longer.
+            stutter_minus_seq = repeat_unit * (allele_n - 1) if allele_n > 1 else None
+            stutter_plus_seq  = repeat_unit * (allele_n + 1)
+
             for _ in range(families_per_allele):
                 umi = _random_umi(umi_len, rng)
 
@@ -282,17 +308,30 @@ def simulate_sample(
                     read_name = f"{sample_name}.{locus}.{read_idx}"
                     read_idx += 1
 
+                    # ── Choose allele sequence for this read ──────────────
+                    # With probability stutter_rate the read comes from an
+                    # n-1 PCR-slippage molecule (backward stutter); with
+                    # probability stutter_plus_rate from an n+1 molecule
+                    # (forward stutter); otherwise the true allele.
+                    roll = rng.random()
+                    if stutter_minus_seq is not None and roll < stutter_rate:
+                        read_allele_seq = stutter_minus_seq
+                    elif roll < stutter_rate + stutter_plus_rate:
+                        read_allele_seq = stutter_plus_seq
+                    else:
+                        read_allele_seq = allele_seq
+
                     # ── Build R1 core ─────────────────────────────────────
                     if is_rc:
                         # On the reverse strand the read spans:
                         # RC(primer) + RC(allele) + RC(anchor)
                         core_r1 = (
                             reverse_complement(primer)
-                            + reverse_complement(allele_seq)
+                            + reverse_complement(read_allele_seq)
                             + reverse_complement(anchor)
                         )
                     else:
-                        core_r1 = primer + allele_seq + anchor
+                        core_r1 = primer + read_allele_seq + anchor
 
                     pad_r1 = max(0, read_len - len(core_r1))
                     raw_r1 = (
@@ -364,6 +403,15 @@ def main():
         ),
     )
     parser.add_argument(
+        "--stutter-rate", type=float, default=STUTTER_DEFAULT_RATE,
+        help=(
+            "Fraction of reads per UMI family that are n-1 PCR-slippage stutter "
+            "molecules (backward stutter). Forward stutter (n+1) is generated at "
+            f"{int(STUTTER_PLUS_FACTOR*100)}%% of this rate. "
+            "Set to 0 to disable stutter simulation."
+        ),
+    )
+    parser.add_argument(
         "--read-len", type=int, default=150,
         help="Read length in bases.",
     )
@@ -393,6 +441,10 @@ def main():
     print(f"Loaded {len(loci)} loci from {args.primer}")
     print(f"Simulating {args.samples} individual(s): "
           f"{args.families} families × {args.reads} reads per allele per locus")
+    print(f"  R1 error rate    : {args.error_rate}")
+    print(f"  R2 error rate    : {r2_error_rate:.4f}")
+    print(f"  Stutter rate     : {args.stutter_rate} (n-1) / "
+          f"{args.stutter_rate * STUTTER_PLUS_FACTOR:.4f} (n+1)")
     print()
 
     truth_path = os.path.join(args.out_dir, "truth.tsv")
@@ -415,6 +467,7 @@ def main():
                 reads_per_family=args.reads,
                 r1_error_rate=args.error_rate,
                 r2_error_rate=r2_error_rate,
+                stutter_rate=args.stutter_rate,
                 rng=rng,
                 r1_fh=r1_fh,
                 r2_fh=r2_fh,
