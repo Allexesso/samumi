@@ -649,6 +649,8 @@ def main():
     if args.mix_pairs:
         print()
         for p in range(1, args.mix_pairs + 1):
+            ind_a = 2 * p - 1
+            ind_b = 2 * p
             for ratio_label, fam_c1, fam_c2 in (
                 ("1to1",
                  max(1, args.families // 2),
