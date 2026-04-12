@@ -33,10 +33,11 @@ AFUZZ=2
 CFUZZ=1
 
 DO_SIMULATE=1
-SAMPLES=20
+SAMPLES=64
 FAMILIES=10
 READS=8
 STUTTER_RATE=0.10
+MIX_PAIRS=15
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -46,6 +47,7 @@ while [[ $# -gt 0 ]]; do
         --families)     FAMILIES="$2";      shift ;;
         --reads)        READS="$2";         shift ;;
         --stutter-rate) STUTTER_RATE="$2";  shift ;;
+        --mix-pairs)    MIX_PAIRS="$2";     shift ;;
         --data-dir)     DATA_DIR="$2";      shift ;;
         --common)       COMMON_SEQ="$2";    shift ;;
         --umi-len)      UMI_LEN="$2";       shift ;;
@@ -77,6 +79,7 @@ if [[ "${DO_SIMULATE}" -eq 1 ]]; then
         --families      "${FAMILIES}" \
         --reads         "${READS}" \
         --stutter-rate  "${STUTTER_RATE}" \
+        --mix-pairs     "${MIX_PAIRS}" \
         --out-dir       "${DATA_DIR}"
     echo
 fi
@@ -90,9 +93,10 @@ fi
 echo "=== Running SamUMI pipeline ==="
 
 shopt -s nullglob
-R1_FILES=("${DATA_DIR}"/sample_*_R1.fq)
+# Process all FASTQ pairs: single-source (sample_*) and mixture (mix_*).
+R1_FILES=("${DATA_DIR}"/*_R1.fq)
 if [[ ${#R1_FILES[@]} -eq 0 ]]; then
-    echo "ERROR: No sample_*_R1.fq files found in ${DATA_DIR}" >&2
+    echo "ERROR: No *_R1.fq files found in ${DATA_DIR}" >&2
     exit 1
 fi
 
