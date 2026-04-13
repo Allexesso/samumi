@@ -147,6 +147,223 @@ def label_file(in_path, sample_name, truth, out_path):
 # Plotting
 # ---------------------------------------------------------------------------
 
+def _sample_type(sample_name):
+    """Classify a sample name into a human-readable category.
+
+    Recognised patterns (produced by simulate_reads.py):
+      mix_*_1to1  → "mixture 1:1  (50% minor)"
+      mix_*_1to9  → "mixture 1:9  (10% minor)"
+      sample_*    → "single-source"
+      anything else → "single-source"
+    """
+    s = sample_name.lower()
+    if "1to9" in s:
+        return "mixture 1:9 (10% minor)"
+    if "1to1" in s:
+        return "mixture 1:1 (50% minor)"
+    return "single-source"
+
+
+def _roc_points(y_true, y_score):
+    """Compute ROC curve points (fpr, tpr) and AUC via trapezoid rule.
+
+    Returns (fpr_list, tpr_list, auc_value).
+    """
+    paired = sorted(zip(y_score, y_true), key=lambda x: -x[0])
+    n_pos = sum(y_true)
+    n_neg = len(y_true) - n_pos
+    if n_pos == 0 or n_neg == 0:
+        return [0, 1], [0, 1], float("nan")
+
+    tp = fp = 0
+    fpr_list, tpr_list = [0.0], [0.0]
+    prev_score = None
+    for score, label in paired:
+        if score != prev_score and prev_score is not None:
+            fpr_list.append(fp / n_neg)
+            tpr_list.append(tp / n_pos)
+        if label:
+            tp += 1
+        else:
+            fp += 1
+        prev_score = score
+    fpr_list.append(fp / n_neg)
+    tpr_list.append(tp / n_pos)
+
+    # Trapezoidal AUC
+    auc = sum(
+        (fpr_list[i] - fpr_list[i - 1]) * (tpr_list[i] + tpr_list[i - 1]) / 2
+        for i in range(1, len(fpr_list))
+    )
+    return fpr_list, tpr_list, auc
+
+
+def _pr_points(y_true, y_score):
+    """Compute precision-recall curve and average precision (AP).
+
+    Returns (recall_list, precision_list, ap_value).
+    """
+    paired = sorted(zip(y_score, y_true), key=lambda x: -x[0])
+    n_pos = sum(y_true)
+    if n_pos == 0:
+        return [0, 1], [1, 0], float("nan")
+
+    tp = fp = 0
+    recalls, precisions = [], []
+    for score, label in paired:
+        if label:
+            tp += 1
+        else:
+            fp += 1
+        recalls.append(tp / n_pos)
+        precisions.append(tp / (tp + fp))
+
+    # AP via trapezoidal rule over recall axis
+    ap = sum(
+        (recalls[i] - recalls[i - 1]) * (precisions[i] + precisions[i - 1]) / 2
+        for i in range(1, len(recalls))
+    )
+    return recalls, precisions, ap
+
+
+def make_model_plots(umi_scored_rows, haplo_scored_rows, out_dir):
+    """Generate model-evaluation PNGs (AUC, PR, score distribution, per-type accuracy).
+
+    Expects rows that contain at least: Correct, pCorrect, Sample.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("  matplotlib not available – skipping model plots.")
+        return
+
+    from collections import defaultdict
+
+    def savefig(name):
+        path = os.path.join(out_dir, name)
+        plt.tight_layout()
+        plt.savefig(path, dpi=150)
+        plt.close()
+        print(f"  Saved: {path}")
+
+    def _parse_scored(rows):
+        """Extract (y_true, y_score, sample_name) triples from scored rows."""
+        out = []
+        for r in rows:
+            try:
+                c = int(r.get("Correct", ""))
+                p = float(r.get("pCorrect", ""))
+                s = r.get("Sample", "unknown")
+                out.append((c, p, s))
+            except (TypeError, ValueError):
+                pass
+        return out
+
+    for label, scored_rows, prefix in (
+        ("UMI-family", umi_scored_rows, "umi"),
+        ("Haplotype", haplo_scored_rows, "haplo"),
+    ):
+        triples = _parse_scored(scored_rows)
+        if not triples:
+            continue
+
+        y_true   = [t[0] for t in triples]
+        y_score  = [t[1] for t in triples]
+        samples  = [t[2] for t in triples]
+        stypes   = [_sample_type(s) for s in samples]
+
+        # ── ROC curve ────────────────────────────────────────────────────────
+        fpr, tpr, auc = _roc_points(y_true, y_score)
+        fig, ax = plt.subplots(figsize=(6, 5))
+        ax.plot(fpr, tpr, color="#2980b9", lw=2,
+                label=f"AUC = {auc:.3f}" if auc == auc else "AUC = N/A")
+        ax.plot([0, 1], [0, 1], "k--", lw=0.8, label="Random")
+        ax.set_xlabel("False Positive Rate")
+        ax.set_ylabel("True Positive Rate")
+        ax.set_title(f"ROC curve – {label} model")
+        ax.legend(loc="lower right")
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1.02)
+        savefig(f"plot_{prefix}_roc.png")
+
+        # ── Precision-Recall curve ────────────────────────────────────────────
+        recalls, precisions, ap = _pr_points(y_true, y_score)
+        baseline = sum(y_true) / len(y_true) if y_true else 0
+        fig, ax = plt.subplots(figsize=(6, 5))
+        ax.plot(recalls, precisions, color="#8e44ad", lw=2,
+                label=f"AP = {ap:.3f}" if ap == ap else "AP = N/A")
+        ax.axhline(baseline, color="gray", linestyle="--", lw=0.8,
+                   label=f"Baseline (prev={baseline:.2f})")
+        ax.set_xlabel("Recall")
+        ax.set_ylabel("Precision")
+        ax.set_title(f"Precision-Recall curve – {label} model")
+        ax.legend(loc="upper right")
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1.02)
+        savefig(f"plot_{prefix}_pr.png")
+
+        # ── Score distribution (pCorrect) coloured by ground truth ───────────
+        correct_scores   = [p for c, p, _ in triples if c == 1]
+        incorrect_scores = [p for c, p, _ in triples if c == 0]
+        fig, ax = plt.subplots(figsize=(7, 4))
+        bins = [i / 20 for i in range(21)]
+        ax.hist(correct_scores,   bins=bins, alpha=0.6, color="#2ecc71",
+                label=f"Correct (n={len(correct_scores)})",   edgecolor="white")
+        ax.hist(incorrect_scores, bins=bins, alpha=0.6, color="#e74c3c",
+                label=f"Incorrect (n={len(incorrect_scores)})", edgecolor="white")
+        ax.set_xlabel("pCorrect (model score)")
+        ax.set_ylabel("Count")
+        ax.set_title(f"Score distribution – {label} model")
+        ax.legend()
+        savefig(f"plot_{prefix}_score_dist.png")
+
+        # ── Accuracy and AUC broken down by sample type ───────────────────────
+        type_data = defaultdict(lambda: {"y_true": [], "y_score": []})
+        for c, p, s in triples:
+            st = _sample_type(s)
+            type_data[st]["y_true"].append(c)
+            type_data[st]["y_score"].append(p)
+
+        type_order = ["single-source", "mixture 1:1 (50% minor)", "mixture 1:9 (10% minor)"]
+        present = [t for t in type_order if t in type_data]
+        if not present:
+            present = sorted(type_data.keys())
+
+        accs = []
+        aucs = []
+        for st in present:
+            yt = type_data[st]["y_true"]
+            yp = type_data[st]["y_score"]
+            acc = sum(1 for v in yt if v == 1) / len(yt) * 100 if yt else 0
+            _, _, a = _roc_points(yt, yp)
+            accs.append(acc)
+            aucs.append(a if a == a else 0)  # replace NaN with 0
+
+        x = range(len(present))
+        fig, ax1 = plt.subplots(figsize=(7, 5))
+        ax2 = ax1.twinx()
+        width = 0.35
+        bars1 = ax1.bar([i - width / 2 for i in x], accs, width,
+                        color="#3498db", label="Accuracy (%)")
+        bars2 = ax2.bar([i + width / 2 for i in x], aucs, width,
+                        color="#e67e22", label="AUC")
+        ax1.set_ylabel("Accuracy (%)", color="#3498db")
+        ax2.set_ylabel("AUC", color="#e67e22")
+        ax1.set_ylim(0, 110)
+        ax2.set_ylim(0, 1.1)
+        ax1.set_xticks(list(x))
+        ax1.set_xticklabels(present, rotation=15, ha="right")
+        ax1.set_title(f"Performance by sample type – {label} model")
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2, loc="lower right")
+        savefig(f"plot_{prefix}_by_type.png")
+
+    print("  Model evaluation plots written.")
+
+
 def make_plots(umi_rows, haplo_rows, out_dir):
     """Generate evaluation PNGs into out_dir."""
     try:
@@ -306,6 +523,14 @@ def make_plots(umi_rows, haplo_rows, out_dir):
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _load_tsv(path):
+    """Load a TSV file and return a list of row dicts. Returns [] on missing file."""
+    if not os.path.isfile(path):
+        return []
+    with open(path, newline="") as fh:
+        return list(csv.DictReader(fh, delimiter="\t"))
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Add Correct labels and generate evaluation plots for SamUMI output.",
@@ -317,6 +542,12 @@ def main():
                         help="Primer TSV file (used only for reporting).")
     parser.add_argument("--no-plots", action="store_true",
                         help="Skip generating PNG plots.")
+    parser.add_argument("--scored-umi",
+                        help="Scored UMI TSV (from UMIRanForApply.R) containing a "
+                             "pCorrect column. Defaults to <data-dir>/umi_scored.tsv.")
+    parser.add_argument("--scored-haplo",
+                        help="Scored haplotype TSV (from HapRanForApply.R) containing "
+                             "a pCorrect column. Defaults to <data-dir>/hap_scored.tsv.")
     args = parser.parse_args()
 
     truth_path = os.path.join(args.data_dir, "truth.tsv")
@@ -398,8 +629,33 @@ def main():
 
     # ── Plots ─────────────────────────────────────────────────────────────────
     if not args.no_plots:
-        print("\nGenerating plots …")
+        print("\nGenerating basic evaluation plots …")
         make_plots(all_umi_rows, all_haplo_rows, args.data_dir)
+
+        # ── Model evaluation plots (AUC / PR / by-type) ───────────────────────
+        scored_umi_path   = args.scored_umi   or os.path.join(args.data_dir, "umi_scored.tsv")
+        scored_haplo_path = args.scored_haplo or os.path.join(args.data_dir, "hap_scored.tsv")
+
+        umi_scored_rows   = _load_tsv(scored_umi_path)
+        haplo_scored_rows = _load_tsv(scored_haplo_path)
+
+        if umi_scored_rows or haplo_scored_rows:
+            print("\nGenerating model evaluation plots (ROC, PR, by-type) …")
+            if umi_scored_rows:
+                print(f"  Loaded {len(umi_scored_rows)} scored UMI rows from {scored_umi_path}")
+            if haplo_scored_rows:
+                print(f"  Loaded {len(haplo_scored_rows)} scored haplotype rows from {scored_haplo_path}")
+            make_model_plots(umi_scored_rows, haplo_scored_rows, args.data_dir)
+        else:
+            print(
+                "\n  No scored TSV files found – skipping ROC/AUC plots.\n"
+                "  Score the combined files with the Apply scripts first:\n"
+                f"    Rscript source_r/UMIRanForApply.R  sim_data/umi_model.rds  "
+                f"{umi_combined}  {scored_umi_path}  3\n"
+                f"    Rscript source_r/HapRanForApply.R  sim_data/hap_model.rds  "
+                f"{haplo_combined}  {scored_haplo_path}  3\n"
+                "  Then re-run label_and_plot.py."
+            )
 
     print("\nDone.")
     print("\nRandom forest training commands (requires R + ranger + tidyverse):")
